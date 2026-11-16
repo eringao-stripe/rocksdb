@@ -475,23 +475,15 @@ class Transaction {
       const ReadOptions& options, const std::vector<Slice>& keys,
       std::vector<std::string>* values) = 0;
 
-  // Batched MultiGetForUpdate for a single column family. Tracks all keys for
-  // conflict validation, acquiring exclusive locks for pessimistic transactions
-  // before reading, including missing keys. If a key cannot be locked or
-  // validated, all statuses receive that error and no values are read. Locks
-  // already acquired remain held by the transaction.
+  // Batched MultiGetForUpdate for a single column family, with PinnableSlice
+  // results. Tracks keys for conflict validation and acquires exclusive locks
+  // for pessimistic transactions before reading, including missing keys. A lock
+  // or validation failure sets all statuses; acquired locks remain held.
   //
-  // keys, values, and statuses must each contain num_keys entries. Results are
-  // returned in input order. Set sorted_input to true only when keys are sorted
-  // by the column family's comparator, to avoid sorting during the read.
-  // Values may pin DB storage; call Reset() on each value when finished.
-  // ReadOptions::snapshot affects DB reads, but not pending transaction writes
-  // or the transaction snapshot used for conflict validation. io_activity must
-  // be kUnknown or kMultiGet. Like other transaction operations, this method
-  // requires external synchronization if the transaction is shared.
-  //
-  // Example: txn->MultiGetForUpdate(ro, cf, n, keys, values, statuses, false);
-  // A default implementation preserves support for custom Transaction classes.
+  // Results preserve input order. keys, values, and statuses each have num_keys
+  // entries. sorted_input requires keys sorted by the column family's
+  // comparator. Reset values when finished. io_activity must be kUnknown or
+  // kMultiGet.
   virtual void MultiGetForUpdate(const ReadOptions& options,
                                  ColumnFamilyHandle* column_family,
                                  size_t num_keys, const Slice* keys,

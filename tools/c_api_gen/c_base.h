@@ -3416,15 +3416,6 @@ extern ROCKSDB_LIBRARY_API void rocksdb_transaction_multi_get_for_update_cf(
     const size_t* keys_list_sizes, char** values_list,
     size_t* values_list_sizes, char** errs);
 
-/* Batched transactional read with exclusive locks and conflict validation.
- * All keys belong to column_family. If sorted_input is true, keys must be
- * sorted by that column family's comparator. Results preserve input order.
- * On success, values[i] must be destroyed with rocksdb_pinnableslice_destroy.
- * Missing keys return NULL for both values[i] and errs[i]. Other failures
- * return NULL values and errors freed with rocksdb_free. A lock or validation
- * failure is reported for every key; previously acquired locks remain held.
- * num_keys == 0 is allowed with NULL key, value, and error arrays.
- */
 extern ROCKSDB_LIBRARY_API void
 rocksdb_transaction_batched_multi_get_for_update_cf(
     rocksdb_transaction_t* txn, const rocksdb_readoptions_t* options,

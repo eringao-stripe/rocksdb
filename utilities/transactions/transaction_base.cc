@@ -501,8 +501,6 @@ void TransactionBaseImpl::MultiGetForUpdate(const ReadOptions& read_options,
     return;
   }
 
-  // Dispatch to the transaction's batched read implementation so each write
-  // policy applies its own visibility callback.
   MultiGet(read_options, column_family, num_keys, keys, values, statuses,
            sorted_input);
 }

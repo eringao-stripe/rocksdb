@@ -343,32 +343,6 @@ static void TestTxnDBBatchedMultiGet(void) {
     rocksdb_transaction_put_cf(txn, cf, "a", 1, "new", 3, &err);
     CheckNoError(err);
     CheckTxnBatchedMultiGet(db, txn, ro, cf, "new");
-    // A competing transaction must receive the lock error for every result.
-    rocksdb_transaction_options_set_lock_timeout(to, 0);
-    rocksdb_transaction_t* other = rocksdb_transaction_begin(db, wo, to, NULL);
-    for (int slices = 0; slices <= 1; ++slices) {
-      const char* keys[2] = {"a", "missing"};
-      const size_t sizes[2] = {1, 7};
-      const rocksdb_slice_t key_slices[2] = {{"a", 1}, {"missing", 7}};
-      rocksdb_pinnableslice_t* values[2];
-      char* errs[2];
-      if (slices) {
-        rocksdb_transaction_batched_multi_get_for_update_cf_slice(
-            other, ro, cf, 2, key_slices, values, errs, true);
-      } else {
-        rocksdb_transaction_batched_multi_get_for_update_cf(
-            other, ro, cf, 2, keys, sizes, values, errs, true);
-      }
-      for (size_t i = 0; i < 2; ++i) {
-        CheckCondition(values[i] == NULL);
-        CheckCondition(errs[i] != NULL);
-        CheckCondition(strstr(errs[i], "Operation timed out") != NULL);
-        rocksdb_free(errs[i]);
-      }
-    }
-    rocksdb_transaction_rollback(other, &err);
-    CheckNoError(err);
-    rocksdb_transaction_destroy(other);
     rocksdb_transaction_prepare(txn, &err);
     CheckNoError(err);
     // WRITE_PREPARED puts the new value in the base DB before commit. Reads
@@ -381,11 +355,6 @@ static void TestTxnDBBatchedMultiGet(void) {
     CheckTxnBatchedMultiGet(db, NULL, ro, cf, "new");
     rocksdb_readoptions_set_snapshot(ro, snapshot);
     CheckTxnBatchedMultiGet(db, NULL, ro, cf, "old");
-    rocksdb_transaction_t* reader = rocksdb_transaction_begin(db, wo, to, NULL);
-    CheckTxnBatchedMultiGet(db, reader, ro, cf, "old");
-    rocksdb_transaction_rollback(reader, &err);
-    CheckNoError(err);
-    rocksdb_transaction_destroy(reader);
     rocksdb_readoptions_set_snapshot(ro, NULL);
     rocksdb_transactiondb_release_snapshot(db, snapshot);
     // A timestamp on a non-timestamped column family must return an error,

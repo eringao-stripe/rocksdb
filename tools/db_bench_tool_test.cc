@@ -32,7 +32,7 @@ class DBBenchTest : public testing::Test {
  public:
   DBBenchTest() : rnd_(0xFB) {
     test_path_ = test::PerThreadDBPath("db_bench_test");
-    Env::Default()->CreateDir(test_path_);
+    EXPECT_OK(Env::Default()->CreateDirIfMissing(test_path_));
     db_path_ = test_path_ + "/db";
     wal_path_ = test_path_ + "/wal";
   }
@@ -188,6 +188,33 @@ TEST_F(DBBenchTest, MultiReadForUpdateLockFailures) {
   ASSERT_EQ(result, 0);
   ASSERT_GT(batches.load(), 1U);
   ASSERT_NE(output.find("aborted batches:"), std::string::npos);
+}
+
+TEST_F(DBBenchTest, MultiReadForUpdateOptimistic) {
+  GFLAGS_NAMESPACE::FlagSaver flag_saver;
+  // Opening a DB gives optimistic_transaction_db precedence when both flags
+  // are enabled. Exercise that case with multiple DBs to check DB selection.
+  for (bool pessimistic : {false, true}) {
+    SCOPED_TRACE(pessimistic ? "both flags, multiple DBs" : "optimistic only");
+    ResetArgs();
+    AppendArgs(
+        {"./db_bench", "--benchmarks=fillseq,multireadrandom",
+         "--use_existing_db=0", "--num=16", "--reads=20", "--threads=2",
+         "--batch_size=4", "--optimistic_transaction_db=true",
+         std::string("--transaction_db=") + (pessimistic ? "true" : "false"),
+         std::string("--num_multi_db=") + (pessimistic ? "2" : "1"),
+         "--multiread_batched=true", "--multiread_for_update=true",
+         std::string("--multiread_sorted_input=") +
+             (pessimistic ? "true" : "false"),
+         "--compression_type=none", "--db=" + db_path_,
+         "--wal_dir=" + wal_path_});
+    testing::internal::CaptureStdout();
+    const int result = db_bench_tool(argc(), argv());
+    const std::string output = testing::internal::GetCapturedStdout();
+    ASSERT_EQ(result, 0);
+    ASSERT_NE(output.find("(20 of 20 found)"), std::string::npos) << output;
+    ASSERT_NE(output.find("(aborted batches: 0)"), std::string::npos) << output;
+  }
 }
 
 TEST_F(DBBenchTest, OptionsFile) {

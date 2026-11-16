@@ -2137,7 +2137,9 @@ DEFINE_int64(multiread_stride, 0,
 DEFINE_bool(multiread_batched, false, "Use the new MultiGet API");
 DEFINE_bool(multiread_for_update, false,
             "Use batched Transaction::MultiGetForUpdate for multireadrandom; "
-            "requires transaction_db and multiread_batched");
+            "requires transaction_db or optimistic_transaction_db, and "
+            "multiread_batched. Each batch is rolled back; optimistic "
+            "commit-time conflict validation is not measured");
 DEFINE_bool(multiread_sorted_input, false,
             "Sort multireadrandom keys before batched MultiGetForUpdate");
 DEFINE_int32(coro_jobs_per_thread, 1,
@@ -8408,11 +8410,13 @@ class Benchmark {
   // Returns the total number of keys found.
   void MultiReadRandom(ThreadState* thread) {
     if (FLAGS_multiread_for_update &&
-        (!FLAGS_transaction_db || !FLAGS_multiread_batched ||
-         multiread_entity_ || multiread_entity_lazy_ ||
-         FLAGS_read_with_metadata || user_timestamp_size_ > 0)) {
+        ((!FLAGS_transaction_db && !FLAGS_optimistic_transaction_db) ||
+         !FLAGS_multiread_batched || multiread_entity_ ||
+         multiread_entity_lazy_ || FLAGS_read_with_metadata ||
+         user_timestamp_size_ > 0)) {
       fprintf(stderr,
-              "multiread_for_update requires transaction_db and "
+              "multiread_for_update requires transaction_db or "
+              "optimistic_transaction_db, and "
               "multiread_batched, without entities, metadata, or timestamps\n");
       db_bench_exit(1);
     }
@@ -8478,7 +8482,8 @@ class Benchmark {
 
     auto duration = thread->shared->MakeDuration(FLAGS_duration, reads_);
     while (!duration.Done(entries_per_batch_)) {
-      DB* db = SelectDB(thread);
+      DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
+      DB* db = db_with_cfh->db;
       if (FLAGS_multiread_stride) {
         int64_t key = GetRandomKey(&thread->rand);
         if ((key + (entries_per_batch_ - 1) * FLAGS_multiread_stride) >=
@@ -8627,11 +8632,16 @@ class Benchmark {
                         return comparator->Compare(a, b) < 0;
                       });
           }
-          auto* txn_db = static_cast_with_check<TransactionDB>(db);
-          TransactionOptions txn_options;
-          txn_options.lock_timeout = FLAGS_transaction_lock_timeout;
-          std::unique_ptr<Transaction> txn(
-              txn_db->BeginTransaction(write_options_, txn_options));
+          std::unique_ptr<Transaction> txn;
+          if (FLAGS_optimistic_transaction_db) {
+            txn.reset(
+                db_with_cfh->opt_txn_db->BeginTransaction(write_options_));
+          } else {
+            auto* txn_db = static_cast_with_check<TransactionDB>(db);
+            TransactionOptions txn_options;
+            txn_options.lock_timeout = FLAGS_transaction_lock_timeout;
+            txn.reset(txn_db->BeginTransaction(write_options_, txn_options));
+          }
           txn->MultiGetForUpdate(
               options, db->DefaultColumnFamily(), keys.size(), keys.data(),
               pin_values, stat_list.data(), FLAGS_multiread_sorted_input);

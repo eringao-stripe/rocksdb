@@ -2134,6 +2134,11 @@ DEFINE_bool(avoid_flush_during_shutdown,
 DEFINE_int64(multiread_stride, 0,
              "Stride length for the keys in a MultiGet batch");
 DEFINE_bool(multiread_batched, false, "Use the new MultiGet API");
+DEFINE_bool(multiread_for_update, false,
+            "Use batched Transaction::MultiGetForUpdate for multireadrandom; "
+            "requires transaction_db and multiread_batched");
+DEFINE_bool(multiread_sorted_input, false,
+            "Sort multireadrandom keys before batched MultiGetForUpdate");
 DEFINE_int32(coro_jobs_per_thread, 1,
              "For readrandomcoroutine and multireadrandomcoroutine: number of "
              "concurrent coroutine jobs per executor thread. Each job does the "
@@ -8401,6 +8406,15 @@ class Benchmark {
   // Calls MultiGet over a list of keys from a random distribution.
   // Returns the total number of keys found.
   void MultiReadRandom(ThreadState* thread) {
+    if (FLAGS_multiread_for_update &&
+        (!FLAGS_transaction_db || !FLAGS_multiread_batched ||
+         multiread_entity_ || multiread_entity_lazy_ ||
+         FLAGS_read_with_metadata || user_timestamp_size_ > 0)) {
+      fprintf(stderr,
+              "multiread_for_update requires transaction_db and "
+              "multiread_batched, without entities, metadata, or timestamps\n");
+      db_bench_exit(1);
+    }
     if (multiread_entity_ && user_timestamp_size_ > 0) {
       fprintf(stderr, "multireadentity does not support user timestamps\n");
       db_bench_exit(1);
@@ -8602,7 +8616,28 @@ class Benchmark {
           }
         }
       } else {
-        if (FLAGS_read_with_metadata) {
+        if (FLAGS_multiread_for_update) {
+          if (FLAGS_multiread_sorted_input) {
+            const Comparator* comparator =
+                db->DefaultColumnFamily()->GetComparator();
+            std::sort(keys.begin(), keys.end(),
+                      [comparator](const Slice& a, const Slice& b) {
+                        return comparator->Compare(a, b) < 0;
+                      });
+          }
+          auto* txn_db = static_cast_with_check<TransactionDB>(db);
+          std::unique_ptr<Transaction> txn(
+              txn_db->BeginTransaction(write_options_));
+          txn->MultiGetForUpdate(
+              options, db->DefaultColumnFamily(), keys.size(), keys.data(),
+              pin_values, stat_list.data(), FLAGS_multiread_sorted_input);
+          const Status s = txn->Rollback();
+          if (!s.ok()) {
+            fprintf(stderr, "Transaction rollback failed: %s\n",
+                    s.ToString().c_str());
+            db_bench_exit(1);
+          }
+        } else if (FLAGS_read_with_metadata) {
           MultiGetOutputMetadata output_metadata;
           output_metadata.WantNewerVersionPresent();
           if (user_timestamp_size_ > 0) {

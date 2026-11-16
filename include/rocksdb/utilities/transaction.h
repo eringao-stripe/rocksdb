@@ -475,6 +475,58 @@ class Transaction {
       const ReadOptions& options, const std::vector<Slice>& keys,
       std::vector<std::string>* values) = 0;
 
+  // Batched MultiGetForUpdate for a single column family. Tracks all keys for
+  // conflict validation, acquiring exclusive locks for pessimistic transactions
+  // before reading, including missing keys. If a key cannot be locked or
+  // validated, all statuses receive that error and no values are read. Locks
+  // already acquired remain held by the transaction.
+  //
+  // keys, values, and statuses must each contain num_keys entries. Results are
+  // returned in input order. Set sorted_input to true only when keys are sorted
+  // by the column family's comparator, to avoid sorting during the read.
+  // Values may pin DB storage; call Reset() on each value when finished.
+  // ReadOptions::snapshot affects DB reads, but not pending transaction writes
+  // or the transaction snapshot used for conflict validation. io_activity must
+  // be kUnknown or kMultiGet. Like other transaction operations, this method
+  // requires external synchronization if the transaction is shared.
+  //
+  // Example: txn->MultiGetForUpdate(ro, cf, n, keys, values, statuses, false);
+  // A default implementation preserves support for custom Transaction classes.
+  virtual void MultiGetForUpdate(const ReadOptions& options,
+                                 ColumnFamilyHandle* column_family,
+                                 size_t num_keys, const Slice* keys,
+                                 PinnableSlice* values, Status* statuses,
+                                 bool sorted_input) {
+    if (num_keys == 0) {
+      return;
+    }
+    Status s;
+    if (options.io_activity != Env::IOActivity::kUnknown &&
+        options.io_activity != Env::IOActivity::kMultiGet) {
+      s = Status::InvalidArgument(
+          "MultiGetForUpdate requires io_activity kUnknown or kMultiGet");
+    } else {
+      ReadOptions lock_options(options);
+      lock_options.io_activity = Env::IOActivity::kUnknown;
+      std::string* const no_value = nullptr;
+      for (size_t i = 0; i < num_keys; ++i) {
+        s = GetForUpdate(lock_options, column_family, keys[i], no_value, true,
+                         true);
+        if (!s.ok()) {
+          break;
+        }
+      }
+    }
+    if (!s.ok()) {
+      for (size_t i = 0; i < num_keys; ++i) {
+        statuses[i] = s;
+      }
+      return;
+    }
+    MultiGet(options, column_family, num_keys, keys, values, statuses,
+             sorted_input);
+  }
+
   // Returns an iterator that will iterate on all keys in the default
   // column family including both keys in the DB and uncommitted keys in this
   // transaction.

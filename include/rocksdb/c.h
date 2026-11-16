@@ -4489,6 +4489,30 @@ extern ROCKSDB_LIBRARY_API void rocksdb_transaction_multi_get_for_update_cf(
     const size_t* keys_list_sizes, char** values_list,
     size_t* values_list_sizes, char** errs);
 
+/* Batched transactional read with exclusive locks and conflict validation.
+ * All keys belong to column_family. If sorted_input is true, keys must be
+ * sorted by that column family's comparator. Results preserve input order.
+ * On success, values[i] must be destroyed with rocksdb_pinnableslice_destroy.
+ * Missing keys return NULL for both values[i] and errs[i]. Other failures
+ * return NULL values and errors freed with rocksdb_free. A lock or validation
+ * failure is reported for every key; previously acquired locks remain held.
+ * num_keys == 0 is allowed with NULL key, value, and error arrays.
+ */
+extern ROCKSDB_LIBRARY_API void
+rocksdb_transaction_batched_multi_get_for_update_cf(
+    rocksdb_transaction_t* txn, const rocksdb_readoptions_t* options,
+    rocksdb_column_family_handle_t* column_family, size_t num_keys,
+    const char* const* keys_list, const size_t* keys_list_sizes,
+    rocksdb_pinnableslice_t** values, char** errs, const bool sorted_input);
+
+/* Same contract as above, with keys supplied as rocksdb_slice_t entries. */
+extern ROCKSDB_LIBRARY_API void
+rocksdb_transaction_batched_multi_get_for_update_cf_slice(
+    rocksdb_transaction_t* txn, const rocksdb_readoptions_t* options,
+    rocksdb_column_family_handle_t* column_family, size_t num_keys,
+    const rocksdb_slice_t* keys_list, rocksdb_pinnableslice_t** values,
+    char** errs, const bool sorted_input);
+
 extern ROCKSDB_LIBRARY_API char* rocksdb_transactiondb_get(
     rocksdb_transactiondb_t* txn_db, const rocksdb_readoptions_t* options,
     const char* key, size_t klen, size_t* vlen, char** errptr);

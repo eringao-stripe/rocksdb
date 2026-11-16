@@ -120,6 +120,136 @@ TEST_P(TransactionTest, PipelinedWriteRequiresSingleQueueWriteCommitted) {
   }
 }
 
+TEST_P(TransactionTest, BatchedMultiGetForUpdate) {
+  ColumnFamilyHandle* cf = nullptr;
+  ASSERT_OK(
+      db->CreateColumnFamily(ColumnFamilyOptions(options), "batched", &cf));
+  std::unique_ptr<ColumnFamilyHandle> cf_guard(cf);
+  ASSERT_OK(db->Put(WriteOptions(), cf, "a", "old"));
+  ASSERT_OK(db->Put(WriteOptions(), cf, "b", ""));
+  ASSERT_OK(db->Put(WriteOptions(), cf, "c", "deleted"));
+  ASSERT_OK(db->Put(WriteOptions(), cf, "d", "base"));
+  ASSERT_OK(db->Put(WriteOptions(), cf, "z", "persisted"));
+
+  // Exercise the optimized implementation and the public API fallback, with
+  // both sorted and unsorted inputs and duplicate keys.
+  for (bool fallback : {false, true}) {
+    for (bool sorted : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "fallback=" << fallback << " sorted=" << sorted);
+      // WRITE_UNPREPARED rollback can restore keys into the memtable. Flush
+      // before each iteration so the DB value below can be pinned from an SST.
+      ASSERT_OK(db->Flush(FlushOptions(), cf));
+      std::unique_ptr<Transaction> txn(db->BeginTransaction(WriteOptions()));
+      ASSERT_OK(txn->Put(cf, "a", "local"));
+      ASSERT_OK(txn->Delete(cf, "c"));
+      ASSERT_OK(txn->Merge(cf, "d", "operand"));
+      std::array<Slice, 7> keys{{"z", "b", "a", "c", "d", "b", "missing"}};
+      if (sorted) {
+        std::sort(keys.begin(), keys.end(), [](const Slice& a, const Slice& b) {
+          return a.compare(b) < 0;
+        });
+      }
+      std::array<PinnableSlice, 7> values;
+      std::array<Status, 7> statuses;
+      ReadOptions ro;
+      ro.io_activity = Env::IOActivity::kMultiGet;
+      if (fallback) {
+        txn->Transaction::MultiGetForUpdate(ro, cf, keys.size(), keys.data(),
+                                            values.data(), statuses.data(),
+                                            sorted);
+      } else {
+        txn->MultiGetForUpdate(ro, cf, keys.size(), keys.data(), values.data(),
+                               statuses.data(), sorted);
+      }
+      for (size_t i = 0; i < keys.size(); ++i) {
+        if (keys[i] == "c" || keys[i] == "missing") {
+          ASSERT_EQ(statuses[i].code(), Status::Code::kNotFound);
+        } else {
+          ASSERT_OK(statuses[i]);
+          const std::string expected = keys[i] == "a"   ? "local"
+                                       : keys[i] == "b" ? ""
+                                       : keys[i] == "d" ? "base,operand"
+                                                        : "persisted";
+          ASSERT_EQ(values[i].ToString(), expected);
+          if (keys[i] == "z") {
+            ASSERT_TRUE(values[i].IsPinned());
+          }
+        }
+      }
+      std::unique_ptr<Transaction> other(db->BeginTransaction(WriteOptions()));
+      // Missing and existing keys both retain their exclusive locks.
+      ASSERT_EQ(other->Put(cf, "missing", "x").code(), Status::Code::kTimedOut);
+      ASSERT_EQ(other->Put(cf, "z", "x").code(), Status::Code::kTimedOut);
+      ASSERT_OK(other->Rollback());
+      txn->MultiGetForUpdate(ro, cf, 0, nullptr, nullptr, nullptr, sorted);
+      ASSERT_OK(txn->Rollback());
+      txn.reset();
+      // Pinned DB values and copied transaction values survive txn destruction.
+      for (size_t i = 0; i < keys.size(); ++i) {
+        if (keys[i] == "a") {
+          ASSERT_EQ(values[i].ToString(), "local");
+        } else if (keys[i] == "z") {
+          ASSERT_EQ(values[i].ToString(), "persisted");
+        }
+        values[i].Reset();
+      }
+    }
+  }
+  ASSERT_OK(db->DropColumnFamily(cf));
+}
+
+TEST_P(TransactionTest, BatchedMultiGetForUpdateErrors) {
+  ASSERT_OK(db->Put(WriteOptions(), "a", "value"));
+  ASSERT_OK(db->Put(WriteOptions(), "b", "value"));
+  ColumnFamilyHandle* cf = db->DefaultColumnFamily();
+  const std::array<Slice, 2> keys{{"a", "b"}};
+  std::array<PinnableSlice, 2> values;
+  std::array<Status, 2> statuses;
+  std::unique_ptr<Transaction> txn(db->BeginTransaction(WriteOptions()));
+  ReadOptions ro;
+  ro.io_activity = Env::IOActivity::kGet;
+  txn->MultiGetForUpdate(ro, cf, keys.size(), keys.data(), values.data(),
+                         statuses.data(), true);
+  for (const Status& s : statuses) {
+    ASSERT_EQ(s.code(), Status::Code::kInvalidArgument);
+  }
+  ASSERT_EQ(txn->GetNumKeys(), 0);
+
+  std::unique_ptr<Transaction> other(db->BeginTransaction(WriteOptions()));
+  ASSERT_OK(other->Put("b", "locked"));
+  ro.io_activity = Env::IOActivity::kUnknown;
+  txn->MultiGetForUpdate(ro, cf, keys.size(), keys.data(), values.data(),
+                         statuses.data(), true);
+  for (size_t i = 0; i < keys.size(); ++i) {
+    ASSERT_EQ(statuses[i].code(), Status::Code::kTimedOut);
+    ASSERT_TRUE(values[i].empty());
+  }
+  ASSERT_EQ(other->Put("a", "locked").code(), Status::Code::kTimedOut);
+  ASSERT_OK(other->Rollback());
+  // Reuse the arrays after an error, then release the acquired locks.
+  txn->MultiGetForUpdate(ro, cf, keys.size(), keys.data(), values.data(),
+                         statuses.data(), true);
+  for (size_t i = 0; i < keys.size(); ++i) {
+    ASSERT_OK(statuses[i]);
+    ASSERT_EQ(values[i].ToString(), "value");
+    values[i].Reset();
+  }
+  ASSERT_OK(txn->Rollback());
+
+  TransactionOptions to;
+  to.set_snapshot = true;
+  txn.reset(db->BeginTransaction(WriteOptions(), to));
+  ASSERT_OK(db->Put(WriteOptions(), "b", "changed"));
+  ro.snapshot = txn->GetSnapshot();
+  txn->MultiGetForUpdate(ro, cf, keys.size(), keys.data(), values.data(),
+                         statuses.data(), true);
+  for (const Status& s : statuses) {
+    ASSERT_EQ(s.code(), Status::Code::kBusy);
+  }
+  ASSERT_OK(txn->Rollback());
+}
+
 TEST_P(TransactionTest, TestUpperBoundUponDeletion) {
   // Reproduction from the original bug report, 11606
   // This test does writes without snapshot validation, and then tries to create

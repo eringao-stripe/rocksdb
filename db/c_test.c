@@ -240,10 +240,11 @@ static void CheckPinnableMultiGetError(
   CheckCondition(strstr(error, expected) != NULL);
 }
 
-static void CheckTxnDBBatchedMultiGet(rocksdb_transactiondb_t* db,
-                                      const rocksdb_readoptions_t* options,
-                                      rocksdb_column_family_handle_t* cf,
-                                      const char* expected_a) {
+static void CheckTxnBatchedMultiGet(rocksdb_transactiondb_t* db,
+                                    rocksdb_transaction_t* txn,
+                                    const rocksdb_readoptions_t* options,
+                                    rocksdb_column_family_handle_t* cf,
+                                    const char* expected_a) {
   for (int sorted = 0; sorted <= 1; ++sorted) {
     const char* keys[4] = {"b", "a", "b", "missing"};
     const size_t sizes[4] = {1, 1, 1, 7};
@@ -263,11 +264,21 @@ static void CheckTxnDBBatchedMultiGet(rocksdb_transactiondb_t* db,
           key_slices[i].data = keys[i];
           key_slices[i].size = sizes[i];
         }
-        rocksdb_transactiondb_batched_multi_get_cf_slice(
-            db, options, cf, 4, key_slices, values, errs, sorted);
+        if (txn != NULL) {
+          rocksdb_transaction_batched_multi_get_for_update_cf_slice(
+              txn, options, cf, 4, key_slices, values, errs, sorted);
+        } else {
+          rocksdb_transactiondb_batched_multi_get_cf_slice(
+              db, options, cf, 4, key_slices, values, errs, sorted);
+        }
       } else {
-        rocksdb_transactiondb_batched_multi_get_cf(db, options, cf, 4, keys,
-                                                   sizes, values, errs, sorted);
+        if (txn != NULL) {
+          rocksdb_transaction_batched_multi_get_for_update_cf(
+              txn, options, cf, 4, keys, sizes, values, errs, sorted);
+        } else {
+          rocksdb_transactiondb_batched_multi_get_cf(
+              db, options, cf, 4, keys, sizes, values, errs, sorted);
+        }
       }
       for (size_t i = 0; i < 4; ++i) {
         CheckNoError(errs[i]);
@@ -283,10 +294,17 @@ static void CheckTxnDBBatchedMultiGet(rocksdb_transactiondb_t* db,
       }
     }
   }
-  rocksdb_transactiondb_batched_multi_get_cf(db, options, cf, 0, NULL, NULL,
-                                             NULL, NULL, false);
-  rocksdb_transactiondb_batched_multi_get_cf_slice(db, options, cf, 0, NULL,
-                                                   NULL, NULL, true);
+  if (txn != NULL) {
+    rocksdb_transaction_batched_multi_get_for_update_cf(
+        txn, options, cf, 0, NULL, NULL, NULL, NULL, false);
+    rocksdb_transaction_batched_multi_get_for_update_cf_slice(
+        txn, options, cf, 0, NULL, NULL, NULL, true);
+  } else {
+    rocksdb_transactiondb_batched_multi_get_cf(db, options, cf, 0, NULL, NULL,
+                                               NULL, NULL, false);
+    rocksdb_transactiondb_batched_multi_get_cf_slice(db, options, cf, 0, NULL,
+                                                     NULL, NULL, true);
+  }
 }
 
 static void TestTxnDBBatchedMultiGet(void) {
@@ -317,25 +335,57 @@ static void TestTxnDBBatchedMultiGet(void) {
     CheckNoError(err);
     rocksdb_transactiondb_put_cf(db, wo, cf, "b", 1, "", 0, &err);
     CheckNoError(err);
-    CheckTxnDBBatchedMultiGet(db, ro, cf, "old");
+    CheckTxnBatchedMultiGet(db, NULL, ro, cf, "old");
 
     rocksdb_transaction_t* txn = rocksdb_transaction_begin(db, wo, to, NULL);
     rocksdb_transaction_set_name(txn, "batched", 7, &err);
     CheckNoError(err);
     rocksdb_transaction_put_cf(txn, cf, "a", 1, "new", 3, &err);
     CheckNoError(err);
+    CheckTxnBatchedMultiGet(db, txn, ro, cf, "new");
+    // A competing transaction must receive the lock error for every result.
+    rocksdb_transaction_options_set_lock_timeout(to, 0);
+    rocksdb_transaction_t* other = rocksdb_transaction_begin(db, wo, to, NULL);
+    for (int slices = 0; slices <= 1; ++slices) {
+      const char* keys[2] = {"a", "missing"};
+      const size_t sizes[2] = {1, 7};
+      const rocksdb_slice_t key_slices[2] = {{"a", 1}, {"missing", 7}};
+      rocksdb_pinnableslice_t* values[2];
+      char* errs[2];
+      if (slices) {
+        rocksdb_transaction_batched_multi_get_for_update_cf_slice(
+            other, ro, cf, 2, key_slices, values, errs, true);
+      } else {
+        rocksdb_transaction_batched_multi_get_for_update_cf(
+            other, ro, cf, 2, keys, sizes, values, errs, true);
+      }
+      for (size_t i = 0; i < 2; ++i) {
+        CheckCondition(values[i] == NULL);
+        CheckCondition(errs[i] != NULL);
+        CheckCondition(strstr(errs[i], "Operation timed out") != NULL);
+        rocksdb_free(errs[i]);
+      }
+    }
+    rocksdb_transaction_rollback(other, &err);
+    CheckNoError(err);
+    rocksdb_transaction_destroy(other);
     rocksdb_transaction_prepare(txn, &err);
     CheckNoError(err);
     // WRITE_PREPARED puts the new value in the base DB before commit. Reads
     // must go through TransactionDB to keep that value invisible.
-    CheckTxnDBBatchedMultiGet(db, ro, cf, "old");
+    CheckTxnBatchedMultiGet(db, NULL, ro, cf, "old");
     const rocksdb_snapshot_t* snapshot =
         rocksdb_transactiondb_create_snapshot(db);
     rocksdb_transaction_commit(txn, &err);
     CheckNoError(err);
-    CheckTxnDBBatchedMultiGet(db, ro, cf, "new");
+    CheckTxnBatchedMultiGet(db, NULL, ro, cf, "new");
     rocksdb_readoptions_set_snapshot(ro, snapshot);
-    CheckTxnDBBatchedMultiGet(db, ro, cf, "old");
+    CheckTxnBatchedMultiGet(db, NULL, ro, cf, "old");
+    rocksdb_transaction_t* reader = rocksdb_transaction_begin(db, wo, to, NULL);
+    CheckTxnBatchedMultiGet(db, reader, ro, cf, "old");
+    rocksdb_transaction_rollback(reader, &err);
+    CheckNoError(err);
+    rocksdb_transaction_destroy(reader);
     rocksdb_readoptions_set_snapshot(ro, NULL);
     rocksdb_transactiondb_release_snapshot(db, snapshot);
     // A timestamp on a non-timestamped column family must return an error,

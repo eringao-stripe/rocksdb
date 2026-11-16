@@ -83,6 +83,7 @@
 #include "rocksdb/utilities/transaction_db.h"
 #include "rocksdb/wide_columns.h"
 #include "rocksdb/write_batch.h"
+#include "test_util/sync_point.h"
 #include "test_util/testutil.h"
 #include "test_util/transaction_test_util.h"
 #include "tools/simulated_hybrid_file_system.h"
@@ -8447,6 +8448,7 @@ class Benchmark {
     int64_t bytes = 0;
     int64_t num_multireads = 0;
     int64_t found = 0;
+    uint64_t aborted_batches = 0;
     ReadOptions options = read_options_;
     std::vector<Slice> keys;
     std::vector<std::unique_ptr<const char[]>> key_guards;
@@ -8626,11 +8628,15 @@ class Benchmark {
                       });
           }
           auto* txn_db = static_cast_with_check<TransactionDB>(db);
+          TransactionOptions txn_options;
+          txn_options.lock_timeout = FLAGS_transaction_lock_timeout;
           std::unique_ptr<Transaction> txn(
-              txn_db->BeginTransaction(write_options_));
+              txn_db->BeginTransaction(write_options_, txn_options));
           txn->MultiGetForUpdate(
               options, db->DefaultColumnFamily(), keys.size(), keys.data(),
               pin_values, stat_list.data(), FLAGS_multiread_sorted_input);
+          TEST_SYNC_POINT_CALLBACK(
+              "Benchmark::MultiReadRandom:MultiGetForUpdate", &stat_list);
           const Status s = txn->Rollback();
           if (!s.ok()) {
             fprintf(stderr, "Transaction rollback failed: %s\n",
@@ -8658,6 +8664,13 @@ class Benchmark {
             bytes +=
                 keys[i].size() + pin_values[i].size() + user_timestamp_size_;
             ++found;
+          } else if (FLAGS_multiread_for_update &&
+                     (stat_list[i].IsTimedOut() || stat_list[i].IsBusy())) {
+            // A lock or validation failure aborts the whole batch. Rollback
+            // above releases any locks acquired before the failure.
+            if (i == 0) {
+              ++aborted_batches;
+            }
           } else if (!stat_list[i].IsNotFound()) {
             // Tolerated IO error: skip this key and continue.
             HandleBenchmarkIOError(stat_list[i], "MultiGet returned an error");
@@ -8680,6 +8693,10 @@ class Benchmark {
              read);
     thread->stats.AddBytes(bytes);
     thread->stats.AddMessage(msg);
+    if (FLAGS_multiread_for_update) {
+      thread->stats.AddMessage(
+          "(aborted batches: " + std::to_string(aborted_batches) + ")");
+    }
   }
 
 #if USE_COROUTINES

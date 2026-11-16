@@ -3416,6 +3416,15 @@ extern ROCKSDB_LIBRARY_API void rocksdb_transaction_multi_get_for_update_cf(
     const size_t* keys_list_sizes, char** values_list,
     size_t* values_list_sizes, char** errs);
 
+/* Batched read for update in one column family, including locks on missing
+ * keys. Results preserve input order. A lock or validation failure sets errors
+ * for every key; locks already acquired remain held until explicitly released
+ * or the transaction ends. On success, destroy each returned value with
+ * rocksdb_pinnableslice_destroy(). Missing keys have NULL values and NULL
+ * errors. Other failures have NULL values and allocated errors; free errors
+ * with rocksdb_free(). sorted_input requires keys sorted by the CF comparator;
+ * otherwise results are undefined. A zero-key call does nothing. Timestamp
+ * requirements match rocksdb_transaction_get_for_update_cf(). */
 extern ROCKSDB_LIBRARY_API void
 rocksdb_transaction_batched_multi_get_for_update_cf(
     rocksdb_transaction_t* txn, const rocksdb_readoptions_t* options,

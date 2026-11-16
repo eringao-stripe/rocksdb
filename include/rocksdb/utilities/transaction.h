@@ -482,41 +482,19 @@ class Transaction {
   //
   // Results preserve input order. keys, values, and statuses each have num_keys
   // entries. sorted_input requires keys sorted by the column family's
-  // comparator. Reset values when finished. io_activity must be kUnknown or
-  // kMultiGet.
-  virtual void MultiGetForUpdate(const ReadOptions& options,
-                                 ColumnFamilyHandle* column_family,
-                                 size_t num_keys, const Slice* keys,
-                                 PinnableSlice* values, Status* statuses,
-                                 bool sorted_input) {
-    if (num_keys == 0) {
-      return;
+  // comparator; otherwise the result is undefined. Call Reset() on each value
+  // when finished to release pinned resources. io_activity must be kUnknown or
+  // kMultiGet. For timestamped column families, the read timestamp and
+  // validation requirements are the same as GetForUpdate. The default
+  // implementation returns NotSupported for every key.
+  virtual void MultiGetForUpdate(const ReadOptions& /*options*/,
+                                 ColumnFamilyHandle* /*column_family*/,
+                                 size_t num_keys, const Slice* /*keys*/,
+                                 PinnableSlice* /*values*/, Status* statuses,
+                                 bool /*sorted_input*/) {
+    for (size_t i = 0; i < num_keys; ++i) {
+      statuses[i] = Status::NotSupported("Batched MultiGetForUpdate");
     }
-    Status s;
-    if (options.io_activity != Env::IOActivity::kUnknown &&
-        options.io_activity != Env::IOActivity::kMultiGet) {
-      s = Status::InvalidArgument(
-          "MultiGetForUpdate requires io_activity kUnknown or kMultiGet");
-    } else {
-      ReadOptions lock_options(options);
-      lock_options.io_activity = Env::IOActivity::kUnknown;
-      std::string* const no_value = nullptr;
-      for (size_t i = 0; i < num_keys; ++i) {
-        s = GetForUpdate(lock_options, column_family, keys[i], no_value, true,
-                         true);
-        if (!s.ok()) {
-          break;
-        }
-      }
-    }
-    if (!s.ok()) {
-      for (size_t i = 0; i < num_keys; ++i) {
-        statuses[i] = s;
-      }
-      return;
-    }
-    MultiGet(options, column_family, num_keys, keys, values, statuses,
-             sorted_input);
   }
 
   // Returns an iterator that will iterate on all keys in the default

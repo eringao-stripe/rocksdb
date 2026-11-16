@@ -178,6 +178,55 @@ TEST_P(TransactionTest, BatchedMultiGetForUpdateLockFailure) {
   ASSERT_OK(txn->Rollback());
 }
 
+TEST_P(TransactionTest, BatchedMultiGetForUpdateValidation) {
+  ASSERT_OK(db->Put(WriteOptions(), "a", "value"));
+  const std::array<Slice, 2> keys{{"a", "a"}};
+  std::array<PinnableSlice, 2> values;
+  std::array<Status, 2> statuses;
+  std::unique_ptr<Transaction> txn(db->BeginTransaction(WriteOptions()));
+  txn->MultiGetForUpdate(ReadOptions(), nullptr, 0, nullptr, nullptr, nullptr,
+                         false);
+  // Third-party subclasses that do not override this API fail without locking.
+  txn->Transaction::MultiGetForUpdate(ReadOptions(), db->DefaultColumnFamily(),
+                                      keys.size(), keys.data(), values.data(),
+                                      statuses.data(), false);
+  for (const Status& status : statuses) {
+    ASSERT_EQ(status.code(), Status::Code::kNotSupported);
+  }
+  ReadOptions read_options;
+  read_options.io_activity = Env::IOActivity::kGet;
+  txn->MultiGetForUpdate(read_options, db->DefaultColumnFamily(), keys.size(),
+                         keys.data(), values.data(), statuses.data(), false);
+  for (const Status& status : statuses) {
+    ASSERT_EQ(status.code(), Status::Code::kInvalidArgument);
+  }
+  std::unique_ptr<Transaction> other(db->BeginTransaction(WriteOptions()));
+  ASSERT_OK(other->Put("a", "other"));
+  ASSERT_OK(other->Rollback());
+
+  read_options.io_activity = Env::IOActivity::kMultiGet;
+  txn->MultiGetForUpdate(read_options, db->DefaultColumnFamily(), keys.size(),
+                         keys.data(), values.data(), statuses.data(), true);
+  for (const Status& status : statuses) {
+    ASSERT_OK(status);
+  }
+  txn->UndoGetForUpdate("a");
+  ASSERT_EQ(other->Put("a", "other").code(), Status::Code::kTimedOut);
+  txn->UndoGetForUpdate("a");
+  ASSERT_OK(other->Put("a", "other"));
+  ASSERT_OK(other->Rollback());
+  ASSERT_OK(txn->Rollback());
+
+  txn->SetSnapshot();
+  ASSERT_OK(db->Put(WriteOptions(), "a", "changed"));
+  txn->MultiGetForUpdate(ReadOptions(), db->DefaultColumnFamily(), keys.size(),
+                         keys.data(), values.data(), statuses.data(), false);
+  for (const Status& status : statuses) {
+    ASSERT_EQ(status.code(), Status::Code::kBusy);
+  }
+  ASSERT_OK(txn->Rollback());
+}
+
 TEST_P(TransactionTest, TestUpperBoundUponDeletion) {
   // Reproduction from the original bug report, 11606
   // This test does writes without snapshot validation, and then tries to create

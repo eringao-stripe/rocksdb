@@ -9,9 +9,12 @@
 
 #include "rocksdb/db_bench_tool.h"
 
+#include <atomic>
+
 #include "db/db_impl/db_impl.h"
 #include "options/options_parser.h"
 #include "rocksdb/utilities/options_util.h"
+#include "test_util/sync_point.h"
 #include "test_util/testharness.h"
 #include "test_util/testutil.h"
 #include "util/random.h"
@@ -154,6 +157,38 @@ class DBBenchTest : public testing::Test {
 };
 
 namespace {}  // namespace
+
+TEST_F(DBBenchTest, MultiReadForUpdateLockFailures) {
+  GFLAGS_NAMESPACE::FlagSaver flag_saver;
+  std::atomic<unsigned> batches{0};
+  SyncPoint::GetInstance()->SetCallBack(
+      "Benchmark::MultiReadRandom:MultiGetForUpdate", [&](void* arg) {
+        auto* statuses = static_cast<std::vector<Status>*>(arg);
+        const unsigned batch = batches.fetch_add(1);
+        for (Status& status : *statuses) {
+          if (!status.ok()) {
+            ASSERT_TRUE(status.IsTimedOut() || status.IsBusy());
+          }
+          status = batch % 2 == 0 ? Status::TimedOut() : Status::Busy();
+        }
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+  ResetArgs();
+  AppendArgs({"./db_bench", "--benchmarks=fillseq,multireadrandom",
+              "--use_existing_db=0", "--num=2", "--reads=20", "--threads=2",
+              "--batch_size=2", "--transaction_db=true",
+              "--multiread_batched=true", "--multiread_for_update=true",
+              "--transaction_lock_timeout=0", "--compression_type=none",
+              "--db=" + db_path_, "--wal_dir=" + wal_path_});
+  testing::internal::CaptureStdout();
+  const int result = db_bench_tool(argc(), argv());
+  const std::string output = testing::internal::GetCapturedStdout();
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  ASSERT_EQ(result, 0);
+  ASSERT_GT(batches.load(), 1U);
+  ASSERT_NE(output.find("aborted batches:"), std::string::npos);
+}
 
 TEST_F(DBBenchTest, OptionsFile) {
   const std::string kOptionsFileName = test_path_ + "/OPTIONS_test";

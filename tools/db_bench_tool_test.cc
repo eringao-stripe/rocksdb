@@ -190,6 +190,26 @@ TEST_F(DBBenchTest, MultiReadForUpdateLockFailures) {
   ASSERT_NE(output.find("aborted batches:"), std::string::npos);
 }
 
+TEST_F(DBBenchTest, MultiReadForUpdateReadOnly) {
+  GFLAGS_NAMESPACE::FlagSaver flag_saver;
+  {
+    Options options;
+    options.create_if_missing = true;
+    std::unique_ptr<DB> db;
+    ASSERT_OK(DB::Open(options, db_path_, &db));
+  }
+
+  ResetArgs();
+  AppendArgs({"./db_bench", "--benchmarks=multireadrandom", "--num=2",
+              "--reads=2", "--threads=1", "--batch_size=2", "--readonly=true",
+              "--transaction_db=false", "--optimistic_transaction_db=true",
+              "--num_multi_db=1", "--multiread_batched=true",
+              "--multiread_for_update=true", "--compression_type=none",
+              "--db=" + db_path_});
+  ASSERT_EXIT(db_bench_tool(argc(), argv()), testing::ExitedWithCode(1),
+              "Cannot use readonly flag with multiread_for_update");
+}
+
 TEST_F(DBBenchTest, MultiReadForUpdateOptimistic) {
   GFLAGS_NAMESPACE::FlagSaver flag_saver;
   // Opening a DB gives optimistic_transaction_db precedence when both flags

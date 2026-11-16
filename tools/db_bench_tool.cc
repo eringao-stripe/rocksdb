@@ -6558,6 +6558,10 @@ class Benchmark {
     options.read_triggered_compaction_threshold =
         FLAGS_read_triggered_compaction_threshold;
 
+    if (FLAGS_readonly && FLAGS_multiread_for_update) {
+      fprintf(stderr, "Cannot use readonly flag with multiread_for_update\n");
+      db_bench_exit(1);
+    }
     if (FLAGS_readonly && FLAGS_transaction_db) {
       fprintf(stderr, "Cannot use readonly flag with transaction_db\n");
       db_bench_exit(1);
